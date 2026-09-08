@@ -1,15 +1,16 @@
 #!/usr/bin/env python3
 """
-Dexter Bot Core - Step 1: Echo Bot Implementation
+Dexter Bot Core - Step 2: AI Integration
 
 This is the ONLY module that talks to Telegram.
 It handles Telegram input/output and passes text to other modules.
-For Step 1, it simply replies "got it" to every text message.
+For Step 2, it routes text messages to the AI engine and handles /reload command.
 
 Architecture constraints:
 - Never imports Gemini, retriever, or logger internals
 - Token must come from environment configuration
 - Uses python-telegram-bot with long polling
+- Communicates with ai/ module only through public interface
 """
 
 import os
@@ -23,6 +24,14 @@ from telegram.ext import (
     MessageHandler,
     filters,
     ContextTypes,
+)
+
+from .commands import (
+    start_command,
+    help_command,
+    reload_command,
+    handle_text_message,
+    handle_non_text_message,
 )
 
 # Set up basic logging for the bot
@@ -44,44 +53,6 @@ def get_bot_token() -> str:
     return token
 
 
-async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /start command."""
-    await update.message.reply_text("Hi! I'm Dexter, your STEM study helper. Send me a message and I'll reply 'got it' for now.")
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """Handle /help command."""
-    await update.message.reply_text("I'm Dexter, a study helper bot. For now, I'll reply 'got it' to any message you send.")
-
-
-async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle text messages.
-    
-    For Step 1, simply reply "got it" to acknowledge receipt.
-    This satisfies the requirement: "every Telegram message gets a 'got it' reply within ~5 s"
-    
-    Args:
-        update: Telegram update object containing the message
-        context: Context for the conversation
-    """
-    message: Optional[Message] = getattr(update, 'message', None)
-    if message and message.text:
-        # For Step 1: simply reply "got it"
-        await message.reply_text("got it")
-
-
-async def handle_non_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    Handle non-text messages (photos, voice, etc.).
-    
-    Per architecture: "Non-text messages (photos, voice): reply 'Text only for now'"
-    """
-    message: Optional[Message] = getattr(update, 'message', None)
-    if message:
-        await message.reply_text("Text only for now — type your question.")
-
-
 def create_application() -> Application:
     """
     Create and configure the Telegram bot application.
@@ -96,6 +67,7 @@ def create_application() -> Application:
     # Register command handlers
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("reload", reload_command))
     
     # Register message handlers
     # Text messages (excluding commands, which are handled above)
