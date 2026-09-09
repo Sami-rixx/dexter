@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Dexter Bot Commands - Step 2 Implementation
+Dexter Bot Commands - Step 3 Implementation
 
 This module contains the command handlers for the bot.
 It maintains the separation between Telegram-specific code and AI logic.
@@ -8,7 +8,8 @@ It maintains the separation between Telegram-specific code and AI logic.
 Architecture constraints:
 - Imports from ai/ module but only the public interface
 - Never imports Gemini SDK internals
-- Never imports logger internals (Step 3)
+- Imports from logger/ module only the public interface
+- Raw Telegram chat IDs are transformed at the boundary before any other module sees them
 """
 
 import os
@@ -19,6 +20,7 @@ from telegram import Update
 from telegram.ext import ContextTypes
 
 from ai.ai_engine import answer, reload_persona
+from logger.logger import get_telegram_id_alias, Exchange, log_exchange
 
 logger = logging.getLogger(__name__)
 
@@ -85,20 +87,58 @@ async def handle_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE
     """
     Handle text messages by passing to AI engine.
     
-    For Step 2: gets answer from AI engine instead of replying "got it".
-    Uses a generic "Student" alias for now (Step 3 will implement real aliases).
+    For Step 3: transforms raw Telegram chat ID at the boundary before
+    any other module sees it. AI engine still receives generic "Student" alias
+    to preserve privacy in the AI prompt, while logger receives privacy-safe alias.
     """
     message = update.message
-    if message and message.text:
+    if message and message.text and hasattr(message, 'chat') and message.chat:
         try:
-            # Use generic alias for now (Step 3 will implement privacy-safe aliases)
-            alias = "Student"
+            # PRIVACY BOUNDARY: Transform raw Telegram chat ID before it reaches any other module
+            # If TELEGRAM_ID_HASH_SALT is not configured, we cannot safely hash the ID,
+            # so we skip logging but still process the message with AI
+            raw_chat_id = message.chat.id
+            try:
+                telegram_id_hash, db_alias = get_telegram_id_alias(raw_chat_id)
+                logging_enabled = True
+            except ValueError as salt_error:
+                # Salt not configured - cannot safely hash Telegram ID
+                # Log diagnostic to stderr only, do NOT expose the error to user
+                logger.error(f"Hashing unavailable: {salt_error}")
+                # Set flag to skip logging, but continue with AI processing
+                logging_enabled = False
+                db_alias = None
+            
+            # AI engine receives generic "Student" alias to preserve privacy in AI prompt
+            # This is independent of logging configuration
+            ai_alias = "Student"
             
             # Call AI engine
-            result = answer(user_text=message.text, alias=alias)
+            result = answer(user_text=message.text, alias=ai_alias)
             
-            # Send the reply text back to user
+            # Send the reply text back to user (this must happen regardless of logging)
             await message.reply_text(result.reply_text)
+            
+            # Log the exchange only if hashing was successful (salt configured)
+            if logging_enabled and db_alias is not None:
+                try:
+                    exchange = Exchange(
+                        chat_alias=db_alias,
+                        user_text=message.text,
+                        snippet_ids=result.snippet_ids,
+                        match_scores=result.match_scores,
+                        model=result.model,
+                        latency_ms=result.latency_ms,
+                        status=result.status,
+                        error=result.error,
+                        reviewed=0,
+                        reviewer_note=None
+                    )
+                    log_exchange(exchange)
+                except Exception as log_error:
+                    # Logging failure must never affect the user's response
+                    logger.error(f"Logging failed: {log_error}")
+                    # User already received their reply above, so no action needed
             
         except Exception as e:
             # Fallback to safe message if AI engine fails

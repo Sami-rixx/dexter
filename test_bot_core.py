@@ -184,7 +184,7 @@ class TestReadmeCompleteness(unittest.TestCase):
         with open('README.md', 'r') as f:
             content = f.read()
         # README should mention current step or Step 1
-        self.assertTrue('BUILD STEP 1' in content or 'BUILD STEP 2' in content)
+        self.assertTrue('BUILD STEP 1' in content or 'BUILD STEP 2' in content or 'BUILD STEP 3' in content)
     
     def test_readme_has_usage_instructions(self):
         """Test that README.md has usage instructions."""
