@@ -24,7 +24,7 @@ import json
 import sqlite3
 import hashlib
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from dataclasses import dataclass, field
 from typing import Optional
 
@@ -284,3 +284,143 @@ def get_telegram_id_alias(chat_id: int) -> tuple[str, str]:
     """
     chat_id_hash = hash_telegram_id(chat_id)
     return get_or_create_user(chat_id_hash)
+
+
+# ---------------------------------------------------------------------------
+# Timezone helpers (architecture section 2: store timestamps as UTC,
+# display Africa/Nairobi). Kenya does not observe daylight saving time,
+# so a fixed UTC+3 offset is exact all year.
+# ---------------------------------------------------------------------------
+
+# Timestamp format used for the `ts` column of the exchanges table.
+TS_FORMAT = "%Y-%m-%dT%H:%M:%S.%fZ"
+
+NAIROBI_UTC_OFFSET = timedelta(hours=3)
+
+
+def nairobi_now() -> datetime:
+    """Current Africa/Nairobi time as an aware datetime (UTC+3, no DST)."""
+    return datetime.now(timezone.utc) + NAIROBI_UTC_OFFSET
+
+
+def nairobi_today() -> str:
+    """Current Africa/Nairobi local date as 'YYYY-MM-DD'."""
+    return nairobi_now().strftime("%Y-%m-%d")
+
+
+def nairobi_day_bounds_utc(date_str: str) -> tuple[str, str]:
+    """
+    UTC timestamp bounds [start, end) of an Africa/Nairobi local date.
+
+    The returned strings use TS_FORMAT so they can be compared directly
+    (lexicographically) against the `ts` column of the exchanges table.
+
+    Args:
+        date_str: Nairobi local date as 'YYYY-MM-DD'
+
+    Returns:
+        tuple: (start_ts_utc, end_ts_utc) in TS_FORMAT
+
+    Raises:
+        ValueError: If date_str is not a valid 'YYYY-MM-DD' date.
+    """
+    day_start_nairobi = datetime.strptime(date_str, "%Y-%m-%d")
+    start_utc = day_start_nairobi - NAIROBI_UTC_OFFSET
+    end_utc = day_start_nairobi + timedelta(days=1) - NAIROBI_UTC_OFFSET
+    return start_utc.strftime(TS_FORMAT), end_utc.strftime(TS_FORMAT)
+
+
+def parse_ts(ts: str) -> Optional[datetime]:
+    """
+    Parse a stored UTC timestamp string into an aware UTC datetime.
+
+    Returns None if the string cannot be parsed (best-effort, never raises).
+    """
+    try:
+        return datetime.strptime(ts, TS_FORMAT).replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Review/status support (architecture sections 6.2, 6.3 and 8).
+# All functions here are best-effort: they never raise to callers.
+# ---------------------------------------------------------------------------
+
+def get_today_exchange_count() -> Optional[int]:
+    """
+    Number of exchanges logged so far in the current Africa/Nairobi day.
+
+    Returns None if the database is unavailable (best-effort, never raises).
+    """
+    try:
+        initialize_database()
+        start_str, end_str = nairobi_day_bounds_utc(nairobi_today())
+        conn = sqlite3.connect(get_database_path())
+        try:
+            cursor = conn.execute(
+                "SELECT COUNT(*) FROM exchanges WHERE ts >= ? AND ts < ?",
+                (start_str, end_str)
+            )
+            return int(cursor.fetchone()[0])
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Failed to count today's exchanges: {e}")
+        return None
+
+
+def get_last_error() -> Optional[dict]:
+    """
+    Most recent non-ok exchange (status 'error' or 'quota_exhausted').
+
+    Returns a dict with keys ts, chat_alias, status, error — or None when
+    there is no error on record or the database is unavailable.
+    Never raises; never returns a raw Telegram ID.
+    """
+    try:
+        initialize_database()
+        conn = sqlite3.connect(get_database_path())
+        try:
+            cursor = conn.execute(
+                "SELECT ts, chat_alias, status, error FROM exchanges "
+                "WHERE status != 'ok' ORDER BY ts DESC, id DESC LIMIT 1"
+            )
+            row = cursor.fetchone()
+        finally:
+            conn.close()
+        if row is None:
+            return None
+        return {
+            "ts": row[0],
+            "chat_alias": row[1],
+            "status": row[2],
+            "error": row[3] or "",
+        }
+    except Exception as e:
+        logger.error(f"Failed to read last error: {e}")
+        return None
+
+
+def purge_old_exchanges(keep_days: int = 90) -> int:
+    """
+    Delete exchanges older than `keep_days` days (architecture section 6.2:
+    keep exchanges at most 90 days after the weekly review, then purge).
+
+    Returns the number of rows deleted, or 0 on failure. Never raises.
+    """
+    try:
+        initialize_database()
+        cutoff = (datetime.now(timezone.utc) - timedelta(days=keep_days)).strftime(TS_FORMAT)
+        conn = sqlite3.connect(get_database_path())
+        try:
+            cursor = conn.execute(
+                "DELETE FROM exchanges WHERE ts < ?", (cutoff,)
+            )
+            conn.commit()
+            return cursor.rowcount if cursor.rowcount and cursor.rowcount > 0 else 0
+        finally:
+            conn.close()
+    except Exception as e:
+        logger.error(f"Failed to purge old exchanges: {e}")
+        return 0
