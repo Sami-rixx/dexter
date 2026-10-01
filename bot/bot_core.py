@@ -15,21 +15,19 @@ Architecture constraints:
 
 import os
 import logging
-from typing import Optional
 
-from telegram import Update, Message
 from telegram.ext import (
     Application,
     CommandHandler,
     MessageHandler,
     filters,
-    ContextTypes,
 )
 
 from .commands import (
     start_command,
     help_command,
     reload_command,
+    status_command,
     handle_text_message,
     handle_non_text_message,
 )
@@ -68,6 +66,7 @@ def create_application() -> Application:
     application.add_handler(CommandHandler("start", start_command))
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("reload", reload_command))
+    application.add_handler(CommandHandler("status", status_command))
     
     # Register message handlers
     # Text messages (excluding commands, which are handled above)
