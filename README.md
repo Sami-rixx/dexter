@@ -221,8 +221,8 @@ To test with real AI responses:
 ## Configuration
 
 ### Model Selection
-- Default: `gemini-2.5-flash` (free tier compatible)
-- Can be changed in `ai/ai_engine.py` if needed
+- Default: `gemini-3.8-flash` (Interactions API compatible)
+- Can be configured via the `GEMINI_MODEL` environment variable (or in `ai/ai_engine.py`)
 
 ### Persona Customization
 - Edit `config/persona.md` to change the bot's personality and behavior

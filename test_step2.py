@@ -4,11 +4,13 @@ Tests for Dexter Bot - BUILD STEP 2
 
 These tests verify Step 2 functionality:
 - AI engine integration
+- Interactions API Gemini client integration (gemini-3.8-flash)
 - EngineResult contract
 - Persona loading and reload
 - Bot to AI integration
 - /reload command behavior
 - Module isolation
+- Regression coverage for success, empty responses, API failures, and missing config
 
 All tests use mocking to avoid requiring real API keys or network access.
 """
@@ -17,6 +19,7 @@ import os
 import unittest
 from unittest.mock import patch, AsyncMock, MagicMock, Mock
 import asyncio
+import google.genai.errors as genai_errors
 
 
 class TestAIEngineResultContract(unittest.TestCase):
@@ -62,7 +65,7 @@ class TestAIEngineResultContract(unittest.TestCase):
             reply_text="Hello, I am Dexter",
             snippet_ids=["test1.md"],
             match_scores=[0.95],
-            model="gemini-2.5-flash",
+            model="gemini-3.8-flash",
             latency_ms=250,
             status=STATUS_OK,
             error=""
@@ -71,7 +74,7 @@ class TestAIEngineResultContract(unittest.TestCase):
         self.assertEqual(result.reply_text, "Hello, I am Dexter")
         self.assertEqual(result.snippet_ids, ["test1.md"])
         self.assertEqual(result.match_scores, [0.95])
-        self.assertEqual(result.model, "gemini-2.5-flash")
+        self.assertEqual(result.model, "gemini-3.8-flash")
         self.assertEqual(result.latency_ms, 250)
         self.assertEqual(result.status, "ok")
         self.assertEqual(result.error, "")
@@ -170,7 +173,7 @@ class TestMockGeminiClient(unittest.TestCase):
         
         # Mock the gemini_client module
         with patch('ai.ai_engine.call_gemini_api') as mock_call:
-            mock_call.return_value = ("This is a test response", "gemini-2.5-flash")
+            mock_call.return_value = ("This is a test response", "gemini-3.8-flash")
             
             from ai.ai_engine import answer
             
@@ -179,7 +182,7 @@ class TestMockGeminiClient(unittest.TestCase):
             # Verify contract
             self.assertIsInstance(result, EngineResult)
             self.assertEqual(result.reply_text, "This is a test response")
-            self.assertEqual(result.model, "gemini-2.5-flash")
+            self.assertEqual(result.model, "gemini-3.8-flash")
             self.assertEqual(result.status, STATUS_OK)
             self.assertEqual(result.snippet_ids, [])  # No retrieval in Step 2
             self.assertEqual(result.match_scores, [])  # No retrieval in Step 2
@@ -243,6 +246,356 @@ class TestMockGeminiClient(unittest.TestCase):
             
             # Verify user text is in the prompt
             self.assertIn(test_text, str(prompt_arg))
+
+
+class TestGeminiInteractionsClient(unittest.TestCase):
+    """
+    Direct tests for the Gemini Client using the Interactions API.
+    Covers successful calls, empty responses, malformed responses,
+    API errors, timeouts, missing configuration, and model customization.
+    """
+
+    def test_successful_interaction_default_model(self):
+        """Test successful Interactions API call with default gemini-3.8-flash model."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = "Water is composed of hydrogen and oxygen (H2O)."
+        mock_response.model = "gemini-3.8-flash"
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("What is water?")
+
+            # Verify client initialization
+            mock_client_cls.assert_called_once_with(api_key='secret-test-key')
+
+            # Verify interactions.create call arguments
+            mock_client.interactions.create.assert_called_once_with(
+                model="gemini-3.8-flash",
+                input="What is water?"
+            )
+
+            # Verify output
+            self.assertEqual(text, "Water is composed of hydrogen and oxygen (H2O).")
+            self.assertEqual(model, "gemini-3.8-flash")
+
+    def test_model_configurable_via_environment_variable(self):
+        """Test model is configurable via GEMINI_MODEL env var."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = "Custom model response"
+        mock_response.model = "gemini-custom-model"
+
+        with patch.dict('os.environ', {
+            'GEMINI_API_KEY': 'secret-test-key',
+            'GEMINI_MODEL': 'gemini-custom-model'
+        }, clear=True), patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello")
+
+            mock_client.interactions.create.assert_called_once_with(
+                model="gemini-custom-model",
+                input="Hello"
+            )
+            self.assertEqual(text, "Custom model response")
+            self.assertEqual(model, "gemini-custom-model")
+
+    def test_explicit_model_name_argument(self):
+        """Test explicitly passed model_name argument overrides default and env var."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = "Override response"
+        mock_response.model = "gemini-explicit-override"
+
+        with patch.dict('os.environ', {
+            'GEMINI_API_KEY': 'secret-test-key',
+            'GEMINI_MODEL': 'gemini-env-model'
+        }, clear=True), patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello", model_name="gemini-explicit-override")
+
+            mock_client.interactions.create.assert_called_once_with(
+                model="gemini-explicit-override",
+                input="Hello"
+            )
+            self.assertEqual(model, "gemini-explicit-override")
+
+    def test_empty_output_text_fallback(self):
+        """Test empty string output_text returns fallback message."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = ""
+        mock_response.model = "gemini-3.8-flash"
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "I'm sorry, I couldn't generate a response.")
+            self.assertEqual(model, "gemini-3.8-flash")
+
+    def test_none_output_text_fallback(self):
+        """Test None output_text returns fallback message."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = None
+        mock_response.model = "gemini-3.8-flash"
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "I'm sorry, I couldn't generate a response.")
+
+    def test_whitespace_output_text_fallback(self):
+        """Test whitespace-only output_text returns fallback message."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_response = Mock()
+        mock_response.output_text = "   \n\t  "
+        mock_response.model = "gemini-3.8-flash"
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "I'm sorry, I couldn't generate a response.")
+
+    def test_none_response_fallback(self):
+        """Test None response returns fallback message."""
+        from ai.gemini_client import call_gemini_api
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = None
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "I'm sorry, I couldn't generate a response.")
+            self.assertEqual(model, "gemini-3.8-flash")
+
+    def test_dict_response_handling(self):
+        """Test dictionary response format is supported."""
+        from ai.gemini_client import call_gemini_api
+
+        dict_response = {
+            "output_text": "Photosynthesis produces glucose and oxygen.",
+            "model": "gemini-3.8-flash"
+        }
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = dict_response
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "Photosynthesis produces glucose and oxygen.")
+            self.assertEqual(model, "gemini-3.8-flash")
+
+    def test_malformed_response_object_fallback(self):
+        """Test malformed response object without output_text returns fallback gracefully."""
+        from ai.gemini_client import call_gemini_api
+
+        class MalformedResponse:
+            pass
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = MalformedResponse()
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "I'm sorry, I couldn't generate a response.")
+
+    def test_steps_fallback_extraction(self):
+        """Test extraction from response.steps when output_text is omitted."""
+        from ai.gemini_client import call_gemini_api
+
+        mock_step = Mock()
+        mock_item = Mock()
+        mock_item.type = "text"
+        mock_item.text = "Answer from step part"
+        mock_step.content = [mock_item]
+
+        mock_response = Mock(spec=['steps'])
+        mock_response.steps = [mock_step]
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.return_value = mock_response
+
+            text, model = call_gemini_api("Hello")
+            self.assertEqual(text, "Answer from step part")
+
+    def test_quota_error_via_status_429(self):
+        """Test API error with 429 status code raises QuotaExhaustedError."""
+        from ai.gemini_client import call_gemini_api
+        from ai.exceptions import QuotaExhaustedError
+
+        api_error = genai_errors.APIError(429, {'error': {'message': 'Rate limit exceeded', 'code': 429}})
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.side_effect = api_error
+
+            with self.assertRaises(QuotaExhaustedError) as ctx:
+                call_gemini_api("Hello")
+            self.assertIn("quota exhausted", str(ctx.exception).lower())
+
+    def test_quota_error_via_message_keywords(self):
+        """Test exception with quota/rate limit keywords raises QuotaExhaustedError."""
+        from ai.gemini_client import call_gemini_api
+        from ai.exceptions import QuotaExhaustedError
+
+        for error_msg in [
+            "Resource quota exceeded for project",
+            "Rate limit reached for model",
+            "429 Too Many Requests",
+            "RESOURCE_EXHAUSTED"
+        ]:
+            with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+                 patch('google.genai.Client') as mock_client_cls:
+                mock_client = MagicMock()
+                mock_client_cls.return_value = mock_client
+                mock_client.interactions.create.side_effect = Exception(error_msg)
+
+                with self.assertRaises(QuotaExhaustedError) as ctx:
+                    call_gemini_api("Hello")
+                self.assertIn("quota exhausted", str(ctx.exception).lower())
+
+    def test_generic_api_error(self):
+        """Test non-quota APIError raises standard Exception with Gemini API error message."""
+        from ai.gemini_client import call_gemini_api
+
+        api_error = genai_errors.APIError(500, {'error': {'message': 'Internal service failure', 'code': 500}})
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.side_effect = api_error
+
+            with self.assertRaises(Exception) as ctx:
+                call_gemini_api("Hello")
+            self.assertIn("Gemini API error:", str(ctx.exception))
+
+    def test_timeout_and_network_error(self):
+        """Test timeout or network failure raises Exception with Gemini API call failed message."""
+        from ai.gemini_client import call_gemini_api
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': 'secret-test-key'}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.side_effect = TimeoutError("Connection timed out")
+
+            with self.assertRaises(Exception) as ctx:
+                call_gemini_api("Hello")
+            self.assertIn("Gemini API call failed:", str(ctx.exception))
+
+    def test_missing_api_key_raises_valueerror(self):
+        """Test missing or empty GEMINI_API_KEY raises ValueError."""
+        from ai.gemini_client import call_gemini_api, get_api_key
+
+        # Missing completely
+        with patch.dict('os.environ', {}, clear=True):
+            with self.assertRaises(ValueError) as ctx:
+                get_api_key()
+            self.assertIn("GEMINI_API_KEY not found", str(ctx.exception))
+
+            with self.assertRaises(ValueError):
+                call_gemini_api("Hello")
+
+        # Empty string
+        with patch.dict('os.environ', {'GEMINI_API_KEY': ''}, clear=True):
+            with self.assertRaises(ValueError):
+                get_api_key()
+
+        # Whitespace only
+        with patch.dict('os.environ', {'GEMINI_API_KEY': '   '}, clear=True):
+            with self.assertRaises(ValueError):
+                get_api_key()
+
+    def test_get_model_name_default_and_override(self):
+        """Test get_model_name returns gemini-3.8-flash by default and supports GEMINI_MODEL."""
+        from ai.gemini_client import get_model_name, DEFAULT_MODEL
+
+        self.assertEqual(DEFAULT_MODEL, "gemini-3.8-flash")
+
+        with patch.dict('os.environ', {}, clear=True):
+            self.assertEqual(get_model_name(), "gemini-3.8-flash")
+
+        with patch.dict('os.environ', {'GEMINI_MODEL': 'gemini-3.8-pro'}, clear=True):
+            self.assertEqual(get_model_name(), "gemini-3.8-pro")
+
+        # Empty or whitespace should fall back to default
+        with patch.dict('os.environ', {'GEMINI_MODEL': '   '}, clear=True):
+            self.assertEqual(get_model_name(), "gemini-3.8-flash")
+
+    def test_api_key_not_exposed_in_exceptions(self):
+        """Ensure secret API key is not included in error strings."""
+        from ai.gemini_client import call_gemini_api
+
+        secret_key = "sensitive_ai_studio_key_xyz987"
+
+        with patch.dict('os.environ', {'GEMINI_API_KEY': secret_key}, clear=True), \
+             patch('google.genai.Client') as mock_client_cls:
+            mock_client = MagicMock()
+            mock_client_cls.return_value = mock_client
+            mock_client.interactions.create.side_effect = Exception("General network failure")
+
+            try:
+                call_gemini_api("Hello")
+            except Exception as e:
+                self.assertNotIn(secret_key, str(e))
+
+    def test_ai_engine_uses_configured_model(self):
+        """Test AIEngine initializes with gemini-3.8-flash and respects env override."""
+        from ai.ai_engine import AIEngine
+
+        with patch.dict('os.environ', {}, clear=True):
+            engine = AIEngine()
+            self.assertEqual(engine.model_name, "gemini-3.8-flash")
+
+        with patch.dict('os.environ', {'GEMINI_MODEL': 'gemini-custom-3.8'}, clear=True):
+            engine = AIEngine()
+            self.assertEqual(engine.model_name, "gemini-custom-3.8")
+
+        # Explicit model overrides env
+        with patch.dict('os.environ', {'GEMINI_MODEL': 'gemini-custom-3.8'}, clear=True):
+            engine = AIEngine(model_name="gemini-explicit")
+            self.assertEqual(engine.model_name, "gemini-explicit")
 
 
 class TestBotCommands(unittest.TestCase):
@@ -446,6 +799,7 @@ def run_step2_tests():
     suite.addTests(loader.loadTestsFromTestCase(TestAIModuleIsolation))
     suite.addTests(loader.loadTestsFromTestCase(TestPersonaLoading))
     suite.addTests(loader.loadTestsFromTestCase(TestMockGeminiClient))
+    suite.addTests(loader.loadTestsFromTestCase(TestGeminiInteractionsClient))
     suite.addTests(loader.loadTestsFromTestCase(TestBotCommands))
     suite.addTests(loader.loadTestsFromTestCase(TestBotToAIIntegration))
     suite.addTests(loader.loadTestsFromTestCase(TestPersonaReloadMalformedHandling))
