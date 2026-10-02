@@ -19,7 +19,7 @@ import logging
 from dataclasses import dataclass, field
 from typing import Optional
 
-from .gemini_client import call_gemini_api
+from .gemini_client import call_gemini_api, get_model_name
 from .exceptions import QuotaExhaustedError, PersonaLoadError
 from .retriever import Snippet, get_retriever, reload_topics
 
@@ -80,18 +80,18 @@ class AIEngine:
     Uses gemini_client for actual API calls, maintaining separation.
     """
     
-    def __init__(self, model_name: str = "gemini-2.5-flash",
+    def __init__(self, model_name: Optional[str] = None,
                  retriever: Optional[object] = None):
         """
         Initialize AI Engine.
         
         Args:
-            model_name: The Gemini model to use (default: gemini-2.5-flash for free tier)
+            model_name: The Gemini model to use (default: GEMINI_MODEL env var or gemini-3.8-flash)
             retriever: Optional knowledge retriever (anything exposing
                 retrieve(query, max_snippets) -> list[Snippet]). Defaults
                 to the shared config/topics/ retriever.
         """
-        self.model_name = model_name
+        self.model_name = model_name or get_model_name()
         self._retriever = retriever
         self._persona_content = ""  # Loaded from persona.md
         self._last_valid_persona = ""  # Backup of last valid persona
